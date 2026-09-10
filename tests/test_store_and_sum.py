@@ -153,3 +153,26 @@ def test_scaling_preserves_the_data_warning():
     scaled = scale_macros(base, 0.00625)
     assert scaled["dataWarning"]["ratio"] == 160.0
     assert scaled["calories"] == 141.75
+
+
+def test_store_creates_missing_parent_directory():
+    """A configured DB path may point at a volume whose directory doesn't exist
+    yet (DUKE_NUTRITION_DB=/data/data.sqlite3 before the mount is populated).
+
+    Regression: this used to raise `unable to open database file` from the
+    module-level `Store()` in app.main, which failed the whole ASGI app — every
+    route, /health included, returned 500 with no clue but a deploy-log
+    traceback.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        nested = os.path.join(tmp, "data", "data.sqlite3")
+        assert not os.path.exists(os.path.dirname(nested))
+
+        store = Store(nested)
+        try:
+            assert os.path.exists(nested)
+            # The schema is usable, not just the file present.
+            store.cache_set("k", {"v": 1})
+            assert store.cache_get("k") == {"v": 1}
+        finally:
+            store.close()

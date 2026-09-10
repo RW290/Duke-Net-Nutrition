@@ -103,6 +103,13 @@ class Store:
 
     def __init__(self, path: str = DEFAULT_DB_PATH):
         self.path = path
+        # The configured path usually points at a mounted volume (e.g.
+        # DUKE_NUTRITION_DB=/data/data.sqlite3). Create the directory rather
+        # than letting sqlite3 fail with a bare "unable to open database file",
+        # which says nothing about which path was wrong or why.
+        parent = os.path.dirname(os.path.abspath(path))
+        if parent:
+            os.makedirs(parent, exist_ok=True)
         self._lock = threading.RLock()
         self._conn = sqlite3.connect(path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row

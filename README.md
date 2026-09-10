@@ -175,8 +175,9 @@ app/
   db.py               SQLite cache + food log
   main.py             FastAPI routes
 tests/
-  fixtures/           real captured NetNutrition HTML
-  test_parsers.py  test_store_and_sum.py  test_dishes.py
+  fixtures/           real captured NetNutrition responses (HTML + JSON envelopes)
+  test_parsers.py  test_cbord_session.py
+  test_store_and_sum.py  test_dishes.py
 ```
 
 ## Deploying on Replit
@@ -188,8 +189,35 @@ uvicorn app.main:app --host 0.0.0.0 --port 8080
 ```
 
 Attach persistent storage and set `DUKE_NUTRITION_DB` to its SQLite path so
-food logs survive restarts. Replit's public URL is the API base URL for the
-frontend; the interactive docs are available at `/docs`.
+food logs survive restarts. This needs a **Reserved VM** deployment — Autoscale
+has no persistent disk, so the log resets on every restart. Replit's public URL
+is the API base URL for the frontend; the interactive docs are at `/docs`.
+
+### Troubleshooting: every endpoint returns 500
+
+If the public URL is reachable but *all* routes fail — `/health` included — the
+ASGI app failed to import; the proxy is up, the process behind it is not. Check
+the deploy log for the traceback rather than the routes.
+
+The usual cause is storage: `DUKE_NUTRITION_DB` points at a volume that isn't
+mounted, so opening the database raises during import and takes the whole app
+down. The app now creates a missing directory, and falls back to ephemeral
+storage if it can't, so this degrades instead of blacking out. `/health` names
+the problem directly:
+
+```jsonc
+// healthy
+{"status": "ok", "database": "/data/data.sqlite3"}
+
+// booted, but the volume is missing — menus work, the log won't survive a restart
+{"status": "degraded", "database": "/tmp/duke-nutrition-fallback.sqlite3",
+ "configuredDatabase": "/data/data.sqlite3",
+ "storageError": "OSError: [Errno 30] Read-only file system: '/data'"}
+```
+
+A `degraded` response means the deployment is serving but storage is
+misconfigured: confirm the deployment is a Reserved VM, that storage is attached
+and mounted, and that `DUKE_NUTRITION_DB` points at a path on it.
 
 **CORS** is enabled (default `*`) so the Replit frontend can call this API.
 Restrict it once the frontend URL is known:
@@ -202,7 +230,7 @@ ALLOWED_ORIGINS=https://your-app.replit.app
 
 Complete: session wrapper, HTML parsing, dish grouping, fractional scaling,
 multi-component meals, caching, SQLite log, and manual-entry fallback.
-**18 tests pass**, verified end-to-end against live NetNutrition in production.
+**41 tests pass**, verified end-to-end against live NetNutrition in production.
 
 **No API keys, no paid services** — the whole thing runs on free infrastructure.
 

@@ -30,6 +30,8 @@ from __future__ import annotations
 import datetime as dt
 import logging
 import os
+import sqlite3
+import tempfile
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Query
@@ -38,7 +40,13 @@ from pydantic import BaseModel, Field
 
 from . import dishes, parsers
 from .cbord import CbordClient, CbordError
-from .db import DEFAULT_TTL_SECONDS, FRESH_ITEM_SECONDS, MENU_TTL_SECONDS, Store
+from .db import (
+    DEFAULT_DB_PATH,
+    DEFAULT_TTL_SECONDS,
+    FRESH_ITEM_SECONDS,
+    MENU_TTL_SECONDS,
+    Store,
+)
 from .scaling import scale_macros, sum_macros
 
 logging.basicConfig(level=logging.INFO)
@@ -51,7 +59,33 @@ app = FastAPI(
                 "Backend only — the frontend is built separately.",
 )
 client = CbordClient()
-store = Store()
+
+
+def _open_store() -> tuple[Store, Optional[str]]:
+    """Open the store, falling back to ephemeral storage if the configured path
+    is unusable.
+
+    DUKE_NUTRITION_DB normally points at a mounted volume (/data/data.sqlite3).
+    When that mount is missing or read-only, a bare `Store()` raises here at
+    import time — which fails the whole ASGI app, so *every* route including
+    /health returns 500 and the only evidence is a traceback in the deploy log.
+    Booting degraded keeps the failure legible: menus still work, and /health
+    reports the storage problem directly.
+    """
+    try:
+        return Store(), None
+    except (sqlite3.Error, OSError) as exc:
+        fallback = os.path.join(tempfile.gettempdir(), "duke-nutrition-fallback.sqlite3")
+        logger.error(
+            "cannot open the database at %s (%s) — falling back to %s. "
+            "Attach persistent storage and set DUKE_NUTRITION_DB to a path on it; "
+            "until then the food log will NOT survive a restart.",
+            DEFAULT_DB_PATH, exc, fallback,
+        )
+        return Store(fallback), f"{type(exc).__name__}: {exc}"
+
+
+store, _storage_error = _open_store()
 
 # The frontend is built and hosted separately (Replit), so browser requests come
 # from a different origin and would be blocked without CORS. Set
@@ -74,7 +108,21 @@ _LABEL_TTL = 12 * 60 * 60
 
 @app.get("/health")
 def health():
-    return {"status": "ok"}
+    """Liveness, plus whether storage landed on the configured path.
+
+    Always 200 when the process is up. `status` is "degraded" rather than "ok"
+    if the app fell back to ephemeral storage, so a misconfigured volume is
+    visible here instead of only in the deploy logs.
+    """
+    if _storage_error is None:
+        return {"status": "ok", "database": store.path}
+    return {
+        "status": "degraded",
+        "database": store.path,
+        "configuredDatabase": DEFAULT_DB_PATH,
+        "storageError": _storage_error,
+        "warning": "using ephemeral storage — the food log will be lost on restart",
+    }
 
 
 @app.get("/")
