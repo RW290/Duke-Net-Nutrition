@@ -30,17 +30,19 @@ from __future__ import annotations
 import datetime as dt
 import logging
 import os
+import re
 import sqlite3
 import tempfile
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from . import dishes, parsers
 from .cbord import CbordClient, CbordError
 from .db import (
+    ANONYMOUS_USER,
     DEFAULT_DB_PATH,
     DEFAULT_TTL_SECONDS,
     FRESH_ITEM_SECONDS,
@@ -533,6 +535,50 @@ def compute_meal(req: ComputeRequest):
 
 # --- food log ------------------------------------------------------------------
 
+# A NetID is a short lowercase alphanumeric handle (e.g. "rw290"). Validated so
+# a malformed or injected value can't silently become someone's log key.
+_NETID_RE = re.compile(r"^[a-z][a-z0-9]{1,19}$")
+
+
+def caller_id(x_duke_netid: Optional[str] = Header(
+        None, alias="X-Duke-NetID",
+        description="Duke NetID, e.g. 'rw290'. Omit to use the shared anonymous log.")
+        ) -> str:
+    """Whose food log this request reads or writes.
+
+    IMPORTANT: this identifies, it does not authenticate. The NetID arrives as a
+    plain header that the client fills in, so anyone can send anyone else's. And
+    NetIDs are short and guessable, which makes that easier here than it would
+    be with a random id — someone who types a friend's NetID sees their food log
+    and can delete from it.
+
+    That is an acceptable trade for a 20-person beta among friends, and it buys
+    the thing a random per-device id can't: the same log on your phone and your
+    laptop, with nothing to copy between them. It is NOT acceptable once this is
+    open to campus.
+
+    To make it real, verify the NetID instead of trusting it: register an app
+    with Duke OIT for Shibboleth/OIDC single sign-on, and set the user key from
+    the verified token subject rather than from this header. Identities are
+    stored prefixed ("netid:rw290") precisely so verified subjects and any
+    future device-scoped ids can coexist without colliding with these.
+
+    A request with no header falls back to the shared anonymous log, which is
+    the pre-NetID behavior — an older frontend build keeps working while
+    clients roll over.
+    """
+    raw = (x_duke_netid or "").strip().lower()
+    if not raw:
+        return ANONYMOUS_USER
+    if not _NETID_RE.match(raw):
+        raise HTTPException(status_code=422, detail={
+            "error": "invalid_netid",
+            "message": "X-Duke-NetID must be a NetID like 'rw290' "
+                       "(letter first, then letters/digits).",
+        })
+    return f"netid:{raw}"
+
+
 class LogRequest(BaseModel):
     components: list[Component] = Field(..., min_length=1)
     label: Optional[str] = Field(None, description="e.g. 'Sashimi bowl, lunch'")
@@ -540,7 +586,7 @@ class LogRequest(BaseModel):
 
 
 @app.post("/log")
-def create_log_entry(req: LogRequest):
+def create_log_entry(req: LogRequest, user_id: str = Depends(caller_id)):
     """Save a logged meal.
 
     The full per-component breakdown is preserved (each detailOid with its own
@@ -552,23 +598,25 @@ def create_log_entry(req: LogRequest):
     total = sum_macros(components)
     timestamp = req.timestamp or dt.datetime.now().isoformat(timespec="seconds")
     log_date = timestamp[:10]
-    return store.add_log_entry(timestamp, log_date, components, total, req.label)
+    return store.add_log_entry(timestamp, log_date, components, total, req.label,
+                               user_id=user_id)
 
 
 @app.get("/log")
-def read_log(date: Optional[str] = Query(None, description="YYYY-MM-DD; omit for all")):
+def read_log(date: Optional[str] = Query(None, description="YYYY-MM-DD; omit for all"),
+             user_id: str = Depends(caller_id)):
     """Past entries, exactly as they were logged (never recomputed).
 
     `dayTotal` sums the stored entry totals for convenience.
     """
-    entries = store.get_log_entries(date)
+    entries = store.get_log_entries(date, user_id=user_id)
     day_total = sum_macros([e["totalNutrition"] for e in entries]) if entries else None
-    return {"date": date, "entries": entries, "dayTotal": day_total}
+    return {"date": date, "userId": user_id, "entries": entries, "dayTotal": day_total}
 
 
 @app.delete("/log/{entry_id}")
-def delete_log_entry(entry_id: str):
-    if not store.delete_log_entry(entry_id):
+def delete_log_entry(entry_id: str, user_id: str = Depends(caller_id)):
+    if not store.delete_log_entry(entry_id, user_id=user_id):
         raise HTTPException(status_code=404, detail=f"no log entry {entry_id}")
     return {"deleted": entry_id}
 

@@ -90,10 +90,24 @@ CREATE TABLE IF NOT EXISTS log_entry (
     label           TEXT,
     components_json TEXT NOT NULL,
     total_json      TEXT NOT NULL,
-    created_at      REAL NOT NULL
+    created_at      REAL NOT NULL,
+    user_id         TEXT NOT NULL DEFAULT 'anonymous'
 );
 
 CREATE INDEX IF NOT EXISTS idx_log_entry_date ON log_entry(log_date);
+"""
+
+
+# Log entries belong to whoever created them. There are no accounts: the client
+# generates an opaque id once and sends it back on every request. Requests with
+# no id fall in this shared bucket, which is also where entries logged before
+# per-person separation existed still live.
+ANONYMOUS_USER = "anonymous"
+
+# Created after the migration below, since it references a column that older
+# databases don't have until then.
+_POST_MIGRATION_INDEXES = """
+CREATE INDEX IF NOT EXISTS idx_log_entry_user_date ON log_entry(user_id, log_date);
 """
 
 
@@ -115,7 +129,24 @@ class Store:
         self._conn.row_factory = sqlite3.Row
         with self._lock:
             self._conn.executescript(_SCHEMA)
+            self._migrate()
+            self._conn.executescript(_POST_MIGRATION_INDEXES)
             self._conn.commit()
+
+    def _migrate(self) -> None:
+        """Bring an existing database up to the current schema.
+
+        CREATE TABLE IF NOT EXISTS silently leaves an older table alone, so a
+        database created before per-person logs keeps its original columns.
+        Entries already in it predate any notion of an owner and can't be
+        attributed after the fact, so they default to the shared anonymous
+        bucket rather than being assigned to whoever migrates first.
+        """
+        cols = {r["name"] for r in self._conn.execute("PRAGMA table_info(log_entry)")}
+        if cols and "user_id" not in cols:
+            self._conn.execute(
+                "ALTER TABLE log_entry ADD COLUMN user_id TEXT NOT NULL "
+                "DEFAULT 'anonymous'")
 
     def close(self) -> None:
         with self._lock:
@@ -157,6 +188,12 @@ class Store:
             return cur.rowcount
 
     # -- menu item index (resolve an item's session context + id freshness) ----
+
+    def get_known_units(self) -> dict[str, str]:
+        """Last-seen id -> name for every dining unit, to detect renumbering."""
+        with self._lock:
+            rows = self._conn.execute("SELECT id, name FROM dining_unit").fetchall()
+        return {r["id"]: r["name"] for r in rows}
 
     def upsert_units(self, units: list[dict]) -> None:
         now = time.time()
@@ -225,27 +262,32 @@ class Store:
     # -- food log ---------------------------------------------------------------
 
     def add_log_entry(self, timestamp: str, log_date: str, components: list[dict],
-                      total: dict, label: Optional[str] = None) -> dict:
+                      total: dict, label: Optional[str] = None,
+                      user_id: str = ANONYMOUS_USER) -> dict:
         """Persist one logged meal. `total` is stored verbatim as computed at
         log time and is never recomputed on read."""
         entry_id = str(uuid.uuid4())
         with self._lock:
             self._conn.execute(
                 "INSERT INTO log_entry (id, timestamp, log_date, label, components_json, "
-                "total_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "total_json, created_at, user_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (entry_id, timestamp, log_date, label, json.dumps(components),
-                 json.dumps(total), time.time()),
+                 json.dumps(total), time.time(), user_id),
             )
             self._conn.commit()
         return {"id": entry_id, "timestamp": timestamp, "date": log_date,
                 "label": label, "components": components, "totalNutrition": total}
 
-    def get_log_entries(self, log_date: Optional[str] = None) -> list[dict]:
-        sql = "SELECT * FROM log_entry"
-        params: tuple = ()
+    def get_log_entries(self, log_date: Optional[str] = None,
+                        user_id: str = ANONYMOUS_USER) -> list[dict]:
+        """One person's entries. Scoped by owner always — the default is the
+        anonymous bucket rather than "everyone", so a caller that forgets to
+        pass an id sees too little instead of someone else's food log."""
+        sql = "SELECT * FROM log_entry WHERE user_id = ?"
+        params: tuple = (user_id,)
         if log_date:
-            sql += " WHERE log_date = ?"
-            params = (log_date,)
+            sql += " AND log_date = ?"
+            params = (user_id, log_date)
         sql += " ORDER BY timestamp ASC"
         with self._lock:
             rows = self._conn.execute(sql, params).fetchall()
@@ -261,8 +303,12 @@ class Store:
             for r in rows
         ]
 
-    def delete_log_entry(self, entry_id: str) -> bool:
+    def delete_log_entry(self, entry_id: str, user_id: str = ANONYMOUS_USER) -> bool:
+        """Delete one of this owner's entries. Scoping the DELETE by user_id is
+        what stops one person removing another's entry: ids are handed out in
+        log reads, so an unscoped delete would accept any id anyone had seen."""
         with self._lock:
-            cur = self._conn.execute("DELETE FROM log_entry WHERE id = ?", (entry_id,))
+            cur = self._conn.execute(
+                "DELETE FROM log_entry WHERE id = ? AND user_id = ?", (entry_id, user_id))
             self._conn.commit()
             return cur.rowcount > 0

@@ -176,3 +176,65 @@ def test_store_creates_missing_parent_directory():
             assert store.cache_get("k") == {"v": 1}
         finally:
             store.close()
+
+
+def test_log_entries_are_scoped_to_their_owner():
+    """Each person sees only their own entries, and their own dayTotal.
+
+    Regression: log_entry had no owner column, so every caller read every
+    entry and dayTotal summed the whole beta group's food into one number.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        store = Store(os.path.join(tmp, "log.sqlite3"))
+        try:
+            mine = store.add_log_entry("2026-09-07T12:00:00", "2026-09-07", [],
+                                       _macros("lunch", 700, 40, 10, 50),
+                                       user_id="netid:rw290")
+            store.add_log_entry("2026-09-07T18:00:00", "2026-09-07", [],
+                                _macros("dinner", 1100, 60, 20, 90),
+                                user_id="netid:abc123")
+
+            assert [e["id"] for e in store.get_log_entries(user_id="netid:rw290")] == [mine["id"]]
+            assert len(store.get_log_entries(user_id="netid:abc123")) == 1
+            assert store.get_log_entries(user_id="netid:nobody") == []
+
+            # One person cannot delete another's entry, even knowing its id.
+            assert store.delete_log_entry(mine["id"], user_id="netid:abc123") is False
+            assert len(store.get_log_entries(user_id="netid:rw290")) == 1
+            assert store.delete_log_entry(mine["id"], user_id="netid:rw290") is True
+        finally:
+            store.close()
+
+
+def test_migration_adds_owner_column_to_a_pre_existing_database():
+    """An existing deployment's database predates the user_id column.
+
+    CREATE TABLE IF NOT EXISTS leaves the old table untouched, so opening it
+    must ALTER it in — otherwise every insert fails on the missing column.
+    """
+    import sqlite3
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "old.sqlite3")
+        conn = sqlite3.connect(path)          # schema as it shipped, no user_id
+        conn.executescript("""
+            CREATE TABLE log_entry (
+                id TEXT PRIMARY KEY, timestamp TEXT NOT NULL, log_date TEXT NOT NULL,
+                label TEXT, components_json TEXT NOT NULL, total_json TEXT NOT NULL,
+                created_at REAL NOT NULL);
+            INSERT INTO log_entry VALUES ('old-1', '2026-09-01T12:00:00', '2026-09-01',
+                'logged before per-person logs', '[]', '{}', 0.0);
+        """)
+        conn.commit()
+        conn.close()
+
+        store = Store(path)
+        try:
+            # The pre-existing entry can't be attributed, so it stays anonymous.
+            assert len(store.get_log_entries(user_id="anonymous")) == 1
+            assert store.get_log_entries(user_id="netid:rw290") == []
+            # And the migrated table accepts owned writes.
+            store.add_log_entry("2026-09-08T12:00:00", "2026-09-08", [],
+                                _macros("x", 1, 1, 1, 1), user_id="netid:rw290")
+            assert len(store.get_log_entries(user_id="netid:rw290")) == 1
+        finally:
+            store.close()
