@@ -77,6 +77,16 @@ def health():
     return {"status": "ok"}
 
 
+@app.get("/")
+def root():
+    """Deployment readiness endpoint and pointer to the API documentation."""
+    return {
+        "status": "ok",
+        "service": "Duke NetNutrition API",
+        "docs": "/docs",
+    }
+
+
 # --- units ---------------------------------------------------------------------
 
 def _fetch_units() -> list[dict]:
