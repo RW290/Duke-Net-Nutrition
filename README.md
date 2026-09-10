@@ -334,7 +334,13 @@ multi-component meals, caching, SQLite log, and manual-entry fallback.
 
 Receipt photo parsing was built and then deliberately removed: it was the only
 feature requiring a paid API, and it wasn't worth the cost. Manual entry covers
-the same ground (log any item by name with macros). If it's ever wanted back,
-it lived in `app/receipts.py` and `tests/test_receipts.py` in git history —
-a vision-API extractor plus fuzzy matching against the cached `menu_item`
-index, behind a swappable `Extractor` protocol.
+the same ground (log any item by name with macros).
+
+**The code is not recoverable from this repository.** It lived in
+`app/receipts.py` and `tests/test_receipts.py`, but was deleted before the
+first commit, so no git object here contains it — an earlier version of this
+section said to look in git history, which was wrong. What it did, for anyone
+rebuilding it: a vision-API extractor behind a swappable `Extractor` protocol,
+feeding fuzzy name matching against the cached `menu_item` index. The index it
+matched against still exists (`db.py`), so a replacement only needs the
+extractor and the matcher.
