@@ -68,7 +68,7 @@ the frontend's origin.
    it returns an empty list or errors, the deployment is not working, even
    though `/health` passes.
 3. `/docs` loads the interactive API docs.
-4. `pytest` passes (54 tests). Tests run against fixtures, not the network.
+4. `pytest` passes (58 tests). Tests run against fixtures, not the network.
 5. Per-person logs work. These two must NOT see each other's entries:
 
    ```bash
@@ -92,7 +92,7 @@ at storage that isn't mounted.
 ## A background job runs weekly
 
 The app schedules its own refresh every Monday at 4am US/Eastern to re-pull
-Duke's dining lineup. This needs the process to stay alive between requests,
+Duke's dining lineup and re-sort dish groupings across every venue. This needs the process to stay alive between requests,
 which is another reason it must be a **Reserved VM** — do not "optimize" it to
 Autoscale or add a scale-to-zero setting. Do not add an external cron service or
 a scheduled deployment; the job is in-process already.

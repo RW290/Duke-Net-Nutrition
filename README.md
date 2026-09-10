@@ -64,7 +64,7 @@ POST   /meals/compute                  scale N components + sum → running tota
 POST   /log                            save a LogEntry (components + frozen total)
 GET    /log?date=                      past entries + dayTotal
 DELETE /log/{entryId}
-POST   /admin/refresh                  re-pull the unit list, report lineup changes
+POST   /admin/refresh?audit=           re-pull the lineup; ?audit=true re-sorts dishes
 POST   /cache/clear?prefix=            force a live refetch
 ```
 
@@ -219,12 +219,47 @@ minutes, `menu_unit:{menuOid}` for a day. Two things guard against it:
  "added": ["Red Mango"], "removed": [], "renumbered": ["18: Sazon -> Trinity Cafe"]}
 ```
 
-`app/dish_overrides.json` is the part that does **not** self-heal: `categoryToDish`
-is keyed by categoryId, so a new venue's stations have no overrides until
-someone adds them. They fall back to the automatic prefix matcher, which is
-usually fine and never fails — just sometimes grouped oddly. The Monday job logs
-a warning naming the changes when a re-audit is worth doing. (`standaloneUnits`
-is keyed by *name* for exactly this reason.)
+### A new venue sorts its own dishes
+
+The worst grouping failure used to need a human. When every category at a venue
+starts with the venue's own name — `Freeman Café Soups`, `Freeman Café Desserts`
+— the matcher gets handed a prefix meaning "everything here" and collapses the
+whole cafe into one meaningless 11-section dish. Fixing it took a hand-written
+`null` override per category, so a newly added venue of that shape stayed broken
+until someone noticed.
+
+That case is now detected from its shape: a prefix that is *exactly the venue's
+name* and swallows more sections than a real build-your-own has
+(`MAX_DISH_SECTIONS`) is rejected, and the more specific prefixes below it group
+instead. Both conditions are required — without the size test, an ordinary
+station named after its venue (`1892 Grille` + `1892 Grille Toppings`) would
+stop grouping.
+
+It recovers most of what hand-curation gives, not all of it. On the Freeman
+menu, `Freeman Café Salads` still lands standalone rather than joining the salad
+builder, because prefix matching is literal and `Salads` shares no third word
+with `Salad Add Ons`. The point is the floor, not the ceiling: an unattended new
+venue now degrades to a slightly-split menu instead of one bogus dish.
+
+### The weekly dish audit
+
+The Monday job re-sorts dishes across every unit and reports what still wants a
+human, since `categoryToDish` is keyed by categoryId and cannot self-heal:
+
+```jsonc
+{"unitsAudited": 31,
+ "venuesAutoCorrected": ["Freeman Café"],   // sweep rejected — worth a look
+ "staleOverrideIds": ["1470"],              // matches no live category any more
+ "unreachable": []}
+```
+
+`venuesAutoCorrected` names venues that saved themselves; `staleOverrideIds` are
+entries left behind by renamed stations or closed venues. Run it on demand with
+`POST /admin/refresh?audit=true` — it samples one menu per unit, so it takes a
+while. One unreachable venue is reported, never fatal to the rest.
+
+(`standaloneUnits` is keyed by *name* rather than id for the same
+renumbering reason described above.)
 
 ## Layout
 
@@ -293,7 +328,7 @@ ALLOWED_ORIGINS=https://your-app.replit.app
 
 Complete: session wrapper, HTML parsing, dish grouping, fractional scaling,
 multi-component meals, caching, SQLite log, and manual-entry fallback.
-**54 tests pass**, verified end-to-end against live NetNutrition in production.
+**58 tests pass**, verified end-to-end against live NetNutrition in production.
 
 **No API keys, no paid services** — the whole thing runs on free infrastructure.
 
