@@ -308,10 +308,14 @@ def group_categories(categories: list[dict],
 
     grouped_idxs = {i for d in dishes for i in d["_idxs"]}
     standalone = [categories[i] for i in range(len(categories)) if i not in grouped_idxs]
+
+    # Order by where each dish's first section actually sat on the menu, not
+    # alphabetically — alphabetical order scrambled appetizers/entrees/sides
+    # relative to `standalone`, which keeps the menu's original order.
+    dishes.sort(key=lambda d: min(d["_idxs"]))
     for d in dishes:
         d.pop("_idxs", None)
 
-    dishes.sort(key=lambda d: d["dishName"].lower())
     result = {"dishes": dishes, "standalone": standalone}
     if swept:
         # Surfaced so the weekly audit can name venues that self-corrected —
