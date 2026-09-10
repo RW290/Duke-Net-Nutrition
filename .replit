@@ -42,7 +42,7 @@ externalPort = 80
 
 [userenv.production]
 DUKE_NUTRITION_DB = "/data/data.sqlite3"
-ALLOWED_ORIGINS = "https://duke-nutrition-tracker.replit.app,https://53924085-49c6-4a4d-99f9-701b309478c4-00-q7ff1auvx5c9.janeway.replit.dev"
+ALLOWED_ORIGINS = "https://duke-nutrition-tracker.replit.app,https://2f12dfdc-1726-49da-9adf-6e5074280a26-00-3i0wtoq4qsya5.janeway.replit.dev"
 
 [deployment]
 deploymentTarget = "vm"
