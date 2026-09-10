@@ -33,3 +33,12 @@ outputType = "webview"
 [[ports]]
 localPort = 5000
 externalPort = 80
+
+[userenv]
+
+[userenv.production]
+DUKE_NUTRITION_DB = "/data/data.sqlite3"
+
+[deployment]
+deploymentTarget = "vm"
+run = ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080"]
