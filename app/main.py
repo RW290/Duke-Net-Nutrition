@@ -27,6 +27,8 @@ parsed internally but responses project down to those.
 """
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import datetime as dt
 import logging
 import os
@@ -34,6 +36,7 @@ import re
 import sqlite3
 import tempfile
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -54,7 +57,94 @@ from .scaling import scale_macros, sum_macros
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("api")
 
+# --- weekly refresh ------------------------------------------------------------
+
+# Duke changes its dining lineup between weeks far more often than mid-week —
+# locations open, close for a break, or get renamed over a weekend. Refreshing
+# early Monday means the first person logging breakfast sees the new lineup.
+REFRESH_WEEKDAY = 0   # Monday
+REFRESH_HOUR = 4      # 04:00 campus time; nobody is logging food
+_CAMPUS_TZ = ZoneInfo("America/New_York")
+
+
+def _seconds_until_next_refresh(now: Optional[dt.datetime] = None) -> float:
+    """Seconds from `now` until the next Monday at REFRESH_HOUR, campus time.
+
+    Computed in the campus timezone rather than UTC so the job stays at 4am
+    local across daylight-saving changes instead of drifting an hour twice a year.
+    """
+    now = now or dt.datetime.now(_CAMPUS_TZ)
+    target = now.replace(hour=REFRESH_HOUR, minute=0, second=0, microsecond=0)
+    target += dt.timedelta(days=(REFRESH_WEEKDAY - now.weekday()) % 7)
+    if target <= now:
+        target += dt.timedelta(days=7)
+    return (target - now).total_seconds()
+
+
+def refresh_menu_data() -> dict:
+    """Drop cached menu data, re-pull the live unit list, report what moved.
+
+    Every response is already sourced live, so this isn't about the correctness
+    of one request — it's about the caches. Unit ids are POSITIONAL: Duke adding
+    a location shifts every id above it, so anything still cached under the old
+    numbering points at the wrong venue. Doing this on a schedule bounds that to
+    a week even in the cases the automatic detection can't see.
+    """
+    before = store.get_known_units()
+    for prefix in ("units", "unit_menus:", "menu_unit:"):
+        store.cache_clear(prefix)
+    store.prune_menu_items(0)          # detailOids are re-indexed on next fetch
+
+    units = _fetch_units()
+    after = {u["id"]: u["name"] for u in units}
+    renumbered = sorted(f"{uid}: {before[uid]} -> {after[uid]}"
+                        for uid in before.keys() & after.keys()
+                        if before[uid] != after[uid])
+    report = {
+        "refreshedAt": dt.datetime.now(_CAMPUS_TZ).isoformat(timespec="seconds"),
+        "unitCount": len(units),
+        "added": sorted(set(after.values()) - set(before.values())),
+        "removed": sorted(set(before.values()) - set(after.values())),
+        "renumbered": renumbered,
+    }
+    if report["added"] or renumbered:
+        logger.warning(
+            "dining lineup changed (%d added, %d ids reassigned) — re-audit "
+            "app/dish_overrides.json: categoryToDish is keyed by categoryId, and "
+            "a new venue's stations have no overrides until someone adds them.",
+            len(report["added"]), len(renumbered),
+        )
+    return report
+
+
+async def _weekly_refresh_loop() -> None:
+    """Run refresh_menu_data() every Monday for as long as the process lives."""
+    while True:
+        await asyncio.sleep(_seconds_until_next_refresh())
+        try:
+            # Blocking: hits CBORD over the network and writes SQLite.
+            report = await asyncio.to_thread(refresh_menu_data)
+            logger.info("weekly refresh complete: %s", report)
+        except Exception:
+            # Never let one bad week (CBORD down, network blip) kill the loop.
+            logger.exception("weekly refresh failed; retrying next Monday")
+
+
+@contextlib.asynccontextmanager
+async def lifespan(_app: FastAPI):
+    task = asyncio.create_task(_weekly_refresh_loop())
+    logger.info("weekly refresh scheduled in %.1f hours",
+                _seconds_until_next_refresh() / 3600)
+    try:
+        yield
+    finally:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+
 app = FastAPI(
+    lifespan=lifespan,
     title="Duke NetNutrition API",
     version="0.2.0",
     description="Personal backend for logging Duke dining macros. "
@@ -146,9 +236,32 @@ def _fetch_units() -> list[dict]:
     if cached is not None:
         return cached
     units = parsers.parse_units(client.get_landing_html())
+    _drop_caches_if_unit_ids_shifted(units)
     store.cache_set("units", units, ttl=DEFAULT_TTL_SECONDS)
     store.upsert_units(units)
     return units
+
+
+def _drop_caches_if_unit_ids_shifted(units: list[dict]) -> None:
+    """Clear id-keyed caches when Duke renumbers its dining units.
+
+    Unit ids are positional, so adding a location shifts every id above it.
+    Cached `unit_menus:{id}` entries then serve another venue's menu for up to
+    90 minutes, and `menu_unit:{menuOid}` mappings stay wrong for a day. A name
+    changing under an id we already knew is the tell.
+    """
+    known = store.get_known_units()
+    shifted = [u for u in units if u["id"] in known and known[u["id"]] != u["name"]]
+    if not shifted:
+        return
+    logger.warning(
+        "dining unit ids shifted (%d reassigned, e.g. id %s: %r -> %r) — "
+        "clearing id-keyed menu caches",
+        len(shifted), shifted[0]["id"], known[shifted[0]["id"]], shifted[0]["name"],
+    )
+    store.cache_clear("unit_menus:")
+    store.cache_clear("menu_unit:")
+    store.prune_menu_items(0)
 
 
 @app.get("/units")
@@ -619,6 +732,16 @@ def delete_log_entry(entry_id: str, user_id: str = Depends(caller_id)):
     if not store.delete_log_entry(entry_id, user_id=user_id):
         raise HTTPException(status_code=404, detail=f"no log entry {entry_id}")
     return {"deleted": entry_id}
+
+
+@app.post("/admin/refresh")
+def admin_refresh():
+    """Run the weekly refresh now, and report what changed in the lineup.
+
+    Same work the Monday job does — useful right after Duke opens a location
+    rather than waiting for the schedule.
+    """
+    return refresh_menu_data()
 
 
 # --- cache control -------------------------------------------------------------
