@@ -60,3 +60,43 @@ def test_malformed_netids_are_rejected(bad):
     with pytest.raises(HTTPException) as exc:
         caller_id(bad)
     assert exc.value.status_code == 422
+
+
+def test_dish_audit_reports_stale_overrides_and_survives_a_bad_unit(monkeypatch):
+    """The audit must finish even when a venue is unreachable, and must flag
+    override ids that no longer match any live category."""
+    import app.main as m
+
+    monkeypatch.setattr(m, "_fetch_units", lambda: [
+        {"id": "1", "name": "Freeman Café"},
+        {"id": "2", "name": "Broken Venue"},
+    ])
+
+    def fake_unit_menus(unit_id, refresh=False):
+        if unit_id == "2":
+            raise RuntimeError("CBORD timeout")
+        return {"unitId": unit_id, "periods": [], "directItems": {"categories": [
+            {"categoryId": "1470", "header": "Freeman Café Soups", "items": []},
+            {"categoryId": "1471", "header": "Freeman Café Salads", "items": []},
+            {"categoryId": "1475", "header": "Freeman Café Salad Add Ons", "items": []},
+            {"categoryId": "1476", "header": "Freeman Café Salad Dressings", "items": []},
+            {"categoryId": "2413", "header": "Freeman Café Hot Entreés", "items": []},
+            {"categoryId": "1474", "header": "Freeman Café Desserts", "items": []},
+            {"categoryId": "1477", "header": "Freeman Café Sandwiches", "items": []},
+        ]}}
+
+    monkeypatch.setattr(m, "unit_menus", fake_unit_menus)
+    monkeypatch.setattr(m.dishes, "load_overrides",
+                        lambda *a, **k: {"1470": None, "9999": "Long Gone Dish"})
+
+    report = m.audit_dish_grouping()
+
+    # Six categories remain free after 1470 is pinned, one over the sweep
+    # threshold — so the venue-wide prefix is rejected and reported.
+    assert report["venuesAutoCorrected"] == ["Freeman Café"]
+    # 9999 matches no live category; 1470 does, so only 9999 is stale.
+    assert report["staleOverrideIds"] == ["9999"]
+    # The unreachable venue is reported, not raised.
+    assert len(report["unreachable"]) == 1
+    assert "Broken Venue" in report["unreachable"][0]
+    assert report["unitsAudited"] == 1

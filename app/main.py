@@ -117,6 +117,53 @@ def refresh_menu_data() -> dict:
     return report
 
 
+def audit_dish_grouping() -> dict:
+    """Re-run dish sorting across the whole lineup and report what needs a human.
+
+    The sorting itself is not something to "re-run" for correctness — it happens
+    live on every /dishes request. What this catches is the state around it:
+
+    - **Venues that self-corrected.** A venue-wide prefix now gets rejected
+      automatically instead of collapsing the menu into one pseudo-dish. That
+      recovers most of what a hand-written override would give, not all of it,
+      so these are the venues most worth a human's eye.
+    - **Overrides that have gone stale.** categoryToDish is keyed by categoryId;
+      when a station is renamed or a venue closes, its entry silently stops
+      matching anything and just accumulates in the file.
+
+    Samples one menu per unit rather than every meal period — enough to see
+    which categories and overrides are live, at roughly two CBORD calls per
+    unit instead of a few hundred for the whole lineup.
+    """
+    overrides = dishes.load_overrides()
+    seen_ids: set[str] = set()
+    autohealed: list[str] = []
+    failed: list[str] = []
+
+    for unit in _fetch_units():
+        try:
+            payload = unit_menus(unit["id"])
+            if payload.get("directItems"):
+                cats = payload["directItems"]["categories"]
+            elif payload.get("periods"):
+                cats = menu_items(payload["periods"][0]["menuOid"])["categories"]
+            else:
+                continue
+            seen_ids.update(str(c.get("categoryId")) for c in cats)
+            if _dishes_for(cats, unit_id=unit["id"]).get("venueSweepsRejected"):
+                autohealed.append(unit["name"])
+        except Exception as exc:
+            # One unreachable venue must not abort the audit of the rest.
+            failed.append(f"{unit['name']}: {exc}")
+
+    return {
+        "unitsAudited": len(_fetch_units()) - len(failed),
+        "venuesAutoCorrected": sorted(autohealed),
+        "staleOverrideIds": sorted(cid for cid in overrides if cid not in seen_ids),
+        "unreachable": failed,
+    }
+
+
 async def _weekly_refresh_loop() -> None:
     """Run refresh_menu_data() every Monday for as long as the process lives."""
     while True:
@@ -125,6 +172,14 @@ async def _weekly_refresh_loop() -> None:
             # Blocking: hits CBORD over the network and writes SQLite.
             report = await asyncio.to_thread(refresh_menu_data)
             logger.info("weekly refresh complete: %s", report)
+            audit = await asyncio.to_thread(audit_dish_grouping)
+            logger.info("weekly dish audit: %s", audit)
+            if audit["venuesAutoCorrected"] or audit["staleOverrideIds"]:
+                logger.warning(
+                    "dish grouping needs review — auto-corrected venues: %s; "
+                    "stale override ids: %s. Both are in app/dish_overrides.json.",
+                    audit["venuesAutoCorrected"] or "none",
+                    audit["staleOverrideIds"] or "none")
         except Exception:
             # Never let one bad week (CBORD down, network blip) kill the loop.
             logger.exception("weekly refresh failed; retrying next Monday")
@@ -735,13 +790,19 @@ def delete_log_entry(entry_id: str, user_id: str = Depends(caller_id)):
 
 
 @app.post("/admin/refresh")
-def admin_refresh():
+def admin_refresh(audit: bool = Query(
+        False, description="also re-sort dishes across every unit (slow)")):
     """Run the weekly refresh now, and report what changed in the lineup.
 
     Same work the Monday job does — useful right after Duke opens a location
-    rather than waiting for the schedule.
+    rather than waiting for the schedule. `?audit=true` adds the dish-grouping
+    pass, which walks every unit and takes a while; the Monday job always
+    includes it.
     """
-    return refresh_menu_data()
+    report = refresh_menu_data()
+    if audit:
+        report["dishAudit"] = audit_dish_grouping()
+    return report
 
 
 # --- cache control -------------------------------------------------------------
