@@ -310,3 +310,51 @@ def test_plain_choose_headers_drop_the_directive():
     dish = ["sazon", "build", "your", "own"]
     assert section_role("Choose Base", 4, dish_tokens=dish) == "Base"
     assert section_role("Choose Protein", 4, dish_tokens=dish) == "Protein"
+
+
+def test_venue_wide_prefix_self_corrects_without_an_override():
+    """A newly added venue whose every category is prefixed with its own name
+    must not collapse into one pseudo-dish just because nobody has written
+    overrides for it yet.
+
+    Same headers as the bogus-dish case above, but with the unit name supplied:
+    'Freeman Café' is the prefix the matcher would sweep on, so it is rejected
+    and the more specific salad prefix groups instead.
+    """
+    cats = [{"categoryId": c, "header": h, "items": []} for c, h in FREEMAN]
+    result = group_categories(cats, overrides={}, unit_name="Freeman Café")
+    dishes = _by_name(result)
+
+    # No dish spans the whole cafe any more.
+    assert all(len(d["sections"]) <= 5 for d in dishes.values()), dishes.keys()
+    # The salad builder is found automatically, from the longer prefix.
+    salad = next(d for d in dishes.values() if "salad" in d["dishName"].lower())
+    assert {s["header"] for s in salad["sections"]} == {
+        "Freeman Café Salad Add Ons", "Freeman Café Salad Dressings"}
+    # Everything unrelated falls through instead of being forced into a dish.
+    #
+    # Note "Freeman Café Salads" lands here rather than in the salad dish:
+    # prefix matching is literal, and "Salads" does not share a third word with
+    # "Salad Add Ons". So this recovers most of what a hand-written override
+    # gives, not all of it — the point is that an unattended new venue degrades
+    # to a slightly-split menu instead of one meaningless 11-section dish.
+    assert {c["header"] for c in result["standalone"]} == {
+        "Freeman Café Soups", "Freeman Café Salads",
+        "Freeman Café Hot Entreés", "Freeman Café Desserts"}
+    assert result["venueSweepsRejected"] == ["freeman cafe"]
+
+
+def test_a_station_named_after_its_venue_still_groups():
+    """The size test is what keeps the sweep guard from eating real dishes: a
+    two-category station sharing the venue's name is a genuine build."""
+    cats = [{"categoryId": "253", "header": "1892 Grille", "items": []},
+            {"categoryId": "961", "header": "1892 Grille Toppings", "items": []}]
+    dishes = _by_name(group_categories(cats, overrides={}, unit_name="1892 Grille"))
+    assert len(dishes["1892 Grille"]["sections"]) == 2
+
+
+def test_sweep_guard_leaves_menus_without_a_unit_name_alone():
+    """Unit name is optional on this call; without it nothing is rejected."""
+    cats = [{"categoryId": c, "header": h, "items": []} for c, h in FREEMAN]
+    result = group_categories(cats, overrides={})
+    assert "venueSweepsRejected" not in result

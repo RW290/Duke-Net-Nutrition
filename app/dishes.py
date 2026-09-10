@@ -33,6 +33,20 @@ from typing import Optional
 # grouping "1892 Grille" with "1892 Grille Toppings".
 MIN_PREFIX_WORDS = 2
 
+# A venue whose every category starts with its own name (Freeman Café Soups,
+# Freeman Café Desserts, ...) hands the matcher a prefix that means "everything
+# here", not "one dish", and the whole cafe collapses into one pseudo-dish. That
+# used to need a hand-written null override per category, so a newly added venue
+# of that shape stayed broken until someone noticed.
+#
+# It is detectable without knowing the venue in advance: the prefix is exactly
+# the venue's name AND it swallows more sections than a real build-your-own has.
+# Both conditions are required. Dropping the size test would break the ordinary
+# case of a station named after its venue ("1892 Grille" + "1892 Grille
+# Toppings"), which is two categories and a genuine dish; dropping the name test
+# would start second-guessing large legitimate dishes elsewhere on the menu.
+MAX_DISH_SECTIONS = 5
+
 OVERRIDES_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                               "dish_overrides.json")
 
@@ -251,11 +265,22 @@ def group_categories(categories: list[dict],
         key=lambda kv: (len(kv[1]), len(kv[0])), reverse=True,
     )
 
+    venue_tokens = tuple(normalize_header(unit_name)) if unit_name else ()
+
     assigned: dict[int, str] = {}
     groups: dict[str, list[int]] = {}
+    swept: list[str] = []
     for prefix, members in candidates:
         free = [i for i in members if i not in assigned]
         if len(free) < 2:
+            continue
+        if (venue_tokens and prefix == venue_tokens
+                and len(free) > MAX_DISH_SECTIONS):
+            # A venue-wide sweep, not a dish (see MAX_DISH_SECTIONS). Skipping
+            # it leaves these categories free for the longer, more specific
+            # prefixes below — the real salad builder inside the cafe still
+            # groups; the unrelated sections fall through to standalone.
+            swept.append(" ".join(prefix))
             continue
         dish_name = _display_name(categories, free, len(prefix))
         for i in free:
@@ -287,7 +312,12 @@ def group_categories(categories: list[dict],
         d.pop("_idxs", None)
 
     dishes.sort(key=lambda d: d["dishName"].lower())
-    return {"dishes": dishes, "standalone": standalone}
+    result = {"dishes": dishes, "standalone": standalone}
+    if swept:
+        # Surfaced so the weekly audit can name venues that self-corrected —
+        # they're the ones most likely to still want a human's eye.
+        result["venueSweepsRejected"] = swept
+    return result
 
 
 def _display_name(categories: list[dict], idxs: list[int], prefix_words: int) -> str:
