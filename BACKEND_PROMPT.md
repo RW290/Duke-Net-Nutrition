@@ -57,20 +57,51 @@ the frontend's origin.
 
 ## Verify before you report success
 
-1. `GET /health` returns `{"status": "ok"}`.
+1. `GET /health` returns `{"status": "ok", "database": "/data/data.sqlite3"}`.
+
+   If it returns `"status": "degraded"`, the app booted but could NOT open the
+   database on persistent storage — the response includes `storageError` saying
+   why. Menus will work and the food log will be destroyed on every restart.
+   Fix the storage before reporting success; do not treat degraded as passing.
+
 2. `GET /units` returns a non-empty `units` array. This one hits Duke live — if
    it returns an empty list or errors, the deployment is not working, even
    though `/health` passes.
 3. `/docs` loads the interactive API docs.
-4. `pytest` passes (40 tests). Tests run against fixtures, not the network.
+4. `pytest` passes (54 tests). Tests run against fixtures, not the network.
+5. Per-person logs work. These two must NOT see each other's entries:
+
+   ```bash
+   curl -X POST $URL/log -H 'X-Duke-NetID: aaa111' -H 'Content-Type: application/json' \
+     -d '{"label":"test","components":[{"manualName":"test","quantity":1,"calories":100}]}'
+   curl $URL/log -H 'X-Duke-NetID: bbb222'     # entries must be []
+   ```
 
 Then give me the public URL of this backend. That URL is the frontend's
 `API_BASE_URL` — it is a different Repl with a different URL, so do not assume
 it is the same host as the frontend.
 
+## If every endpoint returns 500
+
+The public URL responding while *every* route fails — `/health` included — means
+the app failed to import, not that a route is broken. The proxy is up; the
+process behind it is not. Read the deployment log for the Python traceback
+instead of testing more routes. The usual cause is `DUKE_NUTRITION_DB` pointing
+at storage that isn't mounted.
+
+## A background job runs weekly
+
+The app schedules its own refresh every Monday at 4am US/Eastern to re-pull
+Duke's dining lineup. This needs the process to stay alive between requests,
+which is another reason it must be a **Reserved VM** — do not "optimize" it to
+Autoscale or add a scale-to-zero setting. Do not add an external cron service or
+a scheduled deployment; the job is in-process already.
+
 ## Do not
 
 - Do not scrape Duke yourself or hardcode menu/dining-hall data — the app
   fetches it live so renamed and added locations track upstream.
-- Do not add auth. The API holds no secrets; CORS is open by design.
+- Do not add auth, accounts, or a login screen. Requests carry an
+  `X-Duke-NetID` header to separate people's food logs; the backend already
+  handles it. CORS stays open so the frontend Repl can send that header.
 - Do not serve a UI. `/docs` is the only HTML this backend serves.

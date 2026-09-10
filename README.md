@@ -64,6 +64,7 @@ POST   /meals/compute                  scale N components + sum → running tota
 POST   /log                            save a LogEntry (components + frozen total)
 GET    /log?date=                      past entries + dayTotal
 DELETE /log/{entryId}
+POST   /admin/refresh                  re-pull the unit list, report lineup changes
 POST   /cache/clear?prefix=            force a live refetch
 ```
 
@@ -112,6 +113,34 @@ seen is passed through to CBORD rather than pre-rejected.
 
 This is also why logged entries freeze their totals — a past entry's detailOid
 generally won't resolve later, so nutrition could never be recomputed from it.
+
+### Whose log: the `X-Duke-NetID` header
+
+Log endpoints are scoped to one person. Send the NetID on every `/log` request:
+
+```
+X-Duke-NetID: rw290
+```
+
+Each NetID gets its own entries and its own `dayTotal`. A request without the
+header falls back to a shared `anonymous` log — the behavior from before this
+existed, so an older client keeps working while it updates.
+
+**This identifies; it does not authenticate.** The header is whatever the client
+sends, and NetIDs are short and guessable, so anyone who types a friend's NetID
+sees that person's log and can delete from it. That is a deliberate trade for a
+small beta: it buys the same log on phone and laptop with nothing to copy
+between them, which a random per-device id can't. It is not good enough for
+campus-wide use.
+
+To make it real, verify the NetID instead of trusting it — register an app with
+Duke OIT for Shibboleth/OIDC and take the user key from the verified token
+subject rather than the header. Ids are stored namespaced (`netid:rw290`) so
+verified subjects can coexist with these without collision.
+
+Deletes are scoped too: `DELETE /log/{entryId}` only removes an entry belonging
+to the calling NetID, and returns 404 otherwise — entry ids are handed out in
+log reads, so an unscoped delete would accept any id anyone had seen.
 
 ### Logging freezes the total
 
@@ -162,6 +191,40 @@ call). Measured: `/units` 1.85s cold → 0.017s warm.
 
 *Deployment note:* on hosts with ephemeral disks, attach persistent storage or
 the log database is lost on redeploy.
+
+## New and changed dining locations
+
+`/units` is parsed from the live landing page on every cache miss, so a new
+restaurant appears on its own — within the 6h unit-list TTL, or immediately with
+`/units?refresh=true`. Nothing about locations is hardcoded.
+
+The subtle part is that **unit ids are positional**: Duke adding a location
+shifts every id above it (observed live — `Red Mango` and `Sazon` appearing
+mid-week renumbered everything after them). Anything cached under the old
+numbering then points at the wrong venue: `unit_menus:{id}` for up to 90
+minutes, `menu_unit:{menuOid}` for a day. Two things guard against it:
+
+- **Detection.** Every refresh of the unit list compares it against the last one
+  seen. A name changing under an id we already knew means a renumber, and the
+  id-keyed caches are dropped immediately.
+- **A weekly floor.** A background job runs every **Monday at 4am campus time**
+  (`REFRESH_WEEKDAY` / `REFRESH_HOUR` in `app/main.py`), clearing cached menu
+  data and re-pulling the lineup, so staleness is bounded to a week even in
+  cases detection can't see. Duke changes its lineup between weeks far more
+  often than mid-week. `POST /admin/refresh` runs the same thing on demand and
+  returns what changed:
+
+```jsonc
+{"refreshedAt": "2026-09-14T04:00:00-04:00", "unitCount": 32,
+ "added": ["Red Mango"], "removed": [], "renumbered": ["18: Sazon -> Trinity Cafe"]}
+```
+
+`app/dish_overrides.json` is the part that does **not** self-heal: `categoryToDish`
+is keyed by categoryId, so a new venue's stations have no overrides until
+someone adds them. They fall back to the automatic prefix matcher, which is
+usually fine and never fails — just sometimes grouped oddly. The Monday job logs
+a warning naming the changes when a re-audit is worth doing. (`standaloneUnits`
+is keyed by *name* for exactly this reason.)
 
 ## Layout
 
@@ -230,7 +293,7 @@ ALLOWED_ORIGINS=https://your-app.replit.app
 
 Complete: session wrapper, HTML parsing, dish grouping, fractional scaling,
 multi-component meals, caching, SQLite log, and manual-entry fallback.
-**41 tests pass**, verified end-to-end against live NetNutrition in production.
+**54 tests pass**, verified end-to-end against live NetNutrition in production.
 
 **No API keys, no paid services** — the whole thing runs on free infrastructure.
 

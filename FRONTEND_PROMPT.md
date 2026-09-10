@@ -16,7 +16,41 @@ do not use the frontend URL as the API URL unless both services run together.
 Interactive docs: `${API_BASE_URL}/docs`
 
 Only four macros matter: **Calories, Protein, Fat, Carbs**. CORS is already open,
-so browser `fetch` works directly. No API key, no auth.
+so browser `fetch` works directly. No API key.
+
+## NetID — build this first
+
+Several people share this backend, and every food-log request must say whose log
+it is. That is a single header:
+
+```
+X-Duke-NetID: rw290
+```
+
+**Send it on every `/log` request** — `POST /log`, `GET /log`, and
+`DELETE /log/{entryId}`. Omitting it silently drops that person into a shared
+`anonymous` log where they see strangers' meals, so make the header impossible
+to forget: put it in one `fetch` wrapper that every API call goes through, not
+at each call site.
+
+What to build:
+
+1. **First launch:** a single screen asking for the person's Duke NetID (the
+   short handle in their Duke email, e.g. `rw290` from `rw290@duke.edu`) — not
+   their email, not their name. One text field and a Continue button.
+2. **Store it** in `localStorage` and read it on every launch after. Nobody
+   should type it twice.
+3. **Validate before saving:** lowercase it, strip spaces, and require a letter
+   followed by letters/digits. The backend returns **422** for a malformed
+   NetID; show the message rather than a generic failure.
+4. **Let them change it** from a small settings screen, and show which NetID is
+   active somewhere unobtrusive on the home screen. Changing it swaps which log
+   is shown — that is expected, not a bug.
+
+This is NOT a login. There is no password and nothing is verified — it only
+separates people's logs. So do not build a sign-up flow, a password field, a
+"forgot password" link, or any account UI, and do not describe it to the user as
+signing in. "Whose log is this?" is the right framing.
 
 ## Core flow
 
@@ -175,6 +209,9 @@ Manual and API-sourced components can be mixed in one logged meal.
   some component was NA; show a small footnote when it's non-empty.
 - Menus are cached ~6h server-side. Add `?refresh=true` behind a pull-to-refresh
   gesture, not on every load.
+- **The dining hall list changes.** Duke opens and renames locations, and the
+  backend re-pulls the lineup weekly. Always render `/units` from the response;
+  never cache it in app code, and never ship a hardcoded list as a fallback.
 
 ## UX
 
@@ -183,6 +220,7 @@ Installable PWA: manifest + service worker + icons. Persist in-progress bowl
 state locally so a refresh doesn't lose it. Show a clear loading state — the
 first call after idle can take a couple of seconds while the backend wakes.
 
-Suggested screens: Today's log (home, with day totals) → pick hall → pick period
+Suggested screens: NetID prompt (first launch only) → Today's log (home, with
+day totals) → pick hall → pick period
 (only when the API returns `periods`) → dish/category list → dish builder with
 live total → confirm & log. Plus a manual-entry screen reachable from anywhere.
