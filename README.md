@@ -4,6 +4,8 @@ A personal REST backend that scrapes Duke's CBORD **NetNutrition** system so a
 separate frontend (built elsewhere, e.g. Replit) can log dining-hall food and
 get accurate macros — including fractional portions.
 
+**Live frontend:** https://duke-nutrition-tracker.replit.app
+
 Surfaced macros: **Calories, Protein, Fat, Carbs** (the full label is parsed
 internally but responses project down to these four).
 
@@ -318,10 +320,10 @@ misconfigured: confirm the deployment is a Reserved VM, that storage is attached
 and mounted, and that `DUKE_NUTRITION_DB` points at a path on it.
 
 **CORS** is enabled (default `*`) so the Replit frontend can call this API.
-Restrict it once the frontend URL is known:
+Restrict it to the deployed frontend:
 
 ```bash
-ALLOWED_ORIGINS=https://your-app.replit.app
+ALLOWED_ORIGINS=https://duke-nutrition-tracker.replit.app
 ```
 
 ## Status
