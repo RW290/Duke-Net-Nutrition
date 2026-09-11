@@ -55,7 +55,13 @@
     "'Freeman Café Coffee' but are alternative drinks, not parts of one build.",
     "",
     "--- Zweli's: the biscuit/sandwich category plus its 'Breakfast Protein",
-    "(Choose 1)' modifier is one flow; sides and pastries are ordered on their own."
+    "(Choose 1)' modifier is one flow; sides and pastries are ordered on their own.",
+    "",
+    "--- Cafe: 'Crepe' and 'Crepe Add Ons' normalize to the single word 'crepe',",
+    "below the matcher's 2-word minimum (same shape as Ramen above), so they never",
+    "merged on their own. 'Pastries All Day' is already its own category and needs",
+    "no entry. 'Gelato Bar' + 'Gelato Bar Add Ons' share the 2-word prefix 'Gelato",
+    "Bar' and match automatically."
   ],
   "standaloneUnits": [
     "Duke Marine Lab",
@@ -126,6 +132,8 @@
     "2406": null,
     "2409": null,
     "2417": "Breakfast Sandwich",
-    "3468": "Breakfast Sandwich"
+    "3468": "Breakfast Sandwich",
+    "485": "Crepe",
+    "1434": "Crepe"
   }
 }
