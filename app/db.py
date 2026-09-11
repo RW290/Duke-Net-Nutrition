@@ -1,24 +1,3 @@
-"""SQLite persistence: response cache + food log.
-
-Two concerns share one database file:
-
-1. **Cache.** Menus don't change intraday, and every menu fetch otherwise costs
-   a multi-request round trip to CBORD. Cached entries carry a TTL (default 6h).
-
-   *Why SQLite rather than an in-memory dict:* the cache survives process
-   restarts. This matters more than raw speed here — the app is deployed on a
-   small host that sleeps/restarts often, and an in-memory cache would be cold
-   after every wake, putting a slow CBORD chain in front of the first request
-   each time. It also keeps one storage mechanism for both concerns instead of
-   two. The cost is a disk round trip per lookup (microseconds locally,
-   irrelevant next to a ~1s CBORD call) and, on hosts with ephemeral disks, the
-   need for a mounted volume to make persistence real.
-
-2. **Food log.** A LogEntry stores a LIST of components, each with its own
-   detailOid and quantity, plus the total computed AT LOG TIME. Past entries
-   must never silently change if CBORD's menu data changes later, so nothing is
-   ever recomputed from live data on read — the stored JSON is returned as-is.
-"""
 from __future__ import annotations
 
 import json
@@ -34,18 +13,10 @@ DEFAULT_DB_PATH = os.environ.get(
     os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data.sqlite3"),
 )
 
-# The unit list changes very rarely (a location is added or renamed).
 DEFAULT_TTL_SECONDS = 6 * 60 * 60
 
-# Menus get a much shorter TTL than their content would suggest. CBORD reissues
-# every detailOid when the menu date rolls over — observed happening in the
-# evening, not at midnight — and a cached menu that outlives the rollover hands
-# out ids that are already dead, making every lookup fail. 90 minutes bounds
-# that window; the self-healing invalidation in the API layer covers the rest.
 MENU_TTL_SECONDS = 90 * 60
 
-# CBORD reissues detailOids each day (the same item has a different id
-# tomorrow), so an indexed item is only useful for matching while it's current.
 FRESH_ITEM_SECONDS = 18 * 60 * 60
 
 _SCHEMA = """
@@ -98,29 +69,17 @@ CREATE INDEX IF NOT EXISTS idx_log_entry_date ON log_entry(log_date);
 """
 
 
-# Log entries belong to whoever created them. There are no accounts: the client
-# generates an opaque id once and sends it back on every request. Requests with
-# no id fall in this shared bucket, which is also where entries logged before
-# per-person separation existed still live.
 ANONYMOUS_USER = "anonymous"
 
-# Created after the migration below, since it references a column that older
-# databases don't have until then.
 _POST_MIGRATION_INDEXES = """
 CREATE INDEX IF NOT EXISTS idx_log_entry_user_date ON log_entry(user_id, log_date);
 """
 
 
 class Store:
-    """Thread-safe SQLite store. One connection guarded by a lock (FastAPI runs
-    handlers on a threadpool; this app is single-user, so a lock is plenty)."""
 
     def __init__(self, path: str = DEFAULT_DB_PATH):
         self.path = path
-        # The configured path usually points at a mounted volume (e.g.
-        # DUKE_NUTRITION_DB=/data/data.sqlite3). Create the directory rather
-        # than letting sqlite3 fail with a bare "unable to open database file",
-        # which says nothing about which path was wrong or why.
         parent = os.path.dirname(os.path.abspath(path))
         if parent:
             os.makedirs(parent, exist_ok=True)
@@ -134,14 +93,6 @@ class Store:
             self._conn.commit()
 
     def _migrate(self) -> None:
-        """Bring an existing database up to the current schema.
-
-        CREATE TABLE IF NOT EXISTS silently leaves an older table alone, so a
-        database created before per-person logs keeps its original columns.
-        Entries already in it predate any notion of an owner and can't be
-        attributed after the fact, so they default to the shared anonymous
-        bucket rather than being assigned to whoever migrates first.
-        """
         cols = {r["name"] for r in self._conn.execute("PRAGMA table_info(log_entry)")}
         if cols and "user_id" not in cols:
             self._conn.execute(
@@ -152,10 +103,8 @@ class Store:
         with self._lock:
             self._conn.close()
 
-    # -- cache ------------------------------------------------------------------
 
     def cache_get(self, key: str) -> Optional[Any]:
-        """Return the cached value, or None if absent or expired."""
         with self._lock:
             row = self._conn.execute(
                 "SELECT value_json, expires_at FROM cache WHERE key = ?", (key,)
@@ -177,7 +126,6 @@ class Store:
             self._conn.commit()
 
     def cache_clear(self, prefix: Optional[str] = None) -> int:
-        """Drop cached entries (all, or those whose key starts with `prefix`)."""
         with self._lock:
             if prefix is None:
                 cur = self._conn.execute("DELETE FROM cache")
@@ -187,10 +135,8 @@ class Store:
             self._conn.commit()
             return cur.rowcount
 
-    # -- menu item index (resolve an item's session context + id freshness) ----
 
     def get_known_units(self) -> dict[str, str]:
-        """Last-seen id -> name for every dining unit, to detect renumbering."""
         with self._lock:
             rows = self._conn.execute("SELECT id, name FROM dining_unit").fetchall()
         return {r["id"]: r["name"] for r in rows}
@@ -206,8 +152,6 @@ class Store:
             self._conn.commit()
 
     def upsert_menu_items(self, items: list[dict]) -> None:
-        """Index items from a parsed menu so later lookups know each item's
-        context (menuOid/unitId) without re-walking the menu."""
         now = time.time()
         rows = [
             (
@@ -234,11 +178,6 @@ class Store:
 
     def find_item_context(self, detail_oid: str,
                           max_age_seconds: Optional[float] = None) -> Optional[dict]:
-        """Most recently seen (menuOid, unitId) context for an item.
-
-        With max_age_seconds, only considers sightings newer than that cutoff —
-        used to tell a currently-valid detailOid from one CBORD has since reissued.
-        """
         sql = ("SELECT menu_oid, unit_id, name FROM menu_item WHERE detail_oid = ?")
         params: tuple = (detail_oid,)
         if max_age_seconds:
@@ -252,20 +191,16 @@ class Store:
         return {"menuOid": row["menu_oid"], "unitId": row["unit_id"], "name": row["name"]}
 
     def prune_menu_items(self, max_age_seconds: float = FRESH_ITEM_SECONDS) -> int:
-        """Drop menu_item rows older than the cutoff (stale detailOids)."""
         with self._lock:
             cur = self._conn.execute("DELETE FROM menu_item WHERE seen_at < ?",
                                      (time.time() - max_age_seconds,))
             self._conn.commit()
             return cur.rowcount
 
-    # -- food log ---------------------------------------------------------------
 
     def add_log_entry(self, timestamp: str, log_date: str, components: list[dict],
                       total: dict, label: Optional[str] = None,
                       user_id: str = ANONYMOUS_USER) -> dict:
-        """Persist one logged meal. `total` is stored verbatim as computed at
-        log time and is never recomputed on read."""
         entry_id = str(uuid.uuid4())
         with self._lock:
             self._conn.execute(
@@ -280,9 +215,6 @@ class Store:
 
     def get_log_entries(self, log_date: Optional[str] = None,
                         user_id: str = ANONYMOUS_USER) -> list[dict]:
-        """One person's entries. Scoped by owner always — the default is the
-        anonymous bucket rather than "everyone", so a caller that forgets to
-        pass an id sees too little instead of someone else's food log."""
         sql = "SELECT * FROM log_entry WHERE user_id = ?"
         params: tuple = (user_id,)
         if log_date:
@@ -303,10 +235,14 @@ class Store:
             for r in rows
         ]
 
+    def purge_old_log_entries(self, max_age_days: float) -> int:
+        cutoff = time.time() - max_age_days * 86400
+        with self._lock:
+            cur = self._conn.execute("DELETE FROM log_entry WHERE created_at < ?", (cutoff,))
+            self._conn.commit()
+            return cur.rowcount
+
     def delete_log_entry(self, entry_id: str, user_id: str = ANONYMOUS_USER) -> bool:
-        """Delete one of this owner's entries. Scoping the DELETE by user_id is
-        what stops one person removing another's entry: ids are handed out in
-        log reads, so an unscoped delete would accept any id anyone had seen."""
         with self._lock:
             cur = self._conn.execute(
                 "DELETE FROM log_entry WHERE id = ? AND user_id = ?", (entry_id, user_id))
